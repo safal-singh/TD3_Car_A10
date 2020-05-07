@@ -1,22 +1,25 @@
 # Self Driving Car
 
+import cv2
 import matplotlib.pyplot as plt
 # Importing the libraries
 import numpy as np
 from PIL import Image as PILImage
+from PIL import ImageDraw
 # Importing the Kivy packages
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.config import Config
 from kivy.core.image import Image as CoreImage
 from kivy.graphics import Color, Line
-from kivy.properties import NumericProperty, ReferenceListProperty, ObjectProperty
+from kivy.properties import BoundedNumericProperty, ReferenceListProperty, ObjectProperty, NumericProperty
 from kivy.uix.button import Button
 from kivy.uix.widget import Widget
 from kivy.vector import Vector
-from matplotlib import cm
 
 from ai import TD3, ReplayBuffer
+
+# TRY USING RGBA FOR SHOWING TRANSPARENCY...!!!!
 
 # Importing the Dqn object from our AI in ai.py
 
@@ -34,14 +37,17 @@ length = 0
 counter = 0
 
 # Getting our AI, which we call "brain", and that contains our neural network that represents our Q-function
-policy = TD3(state_dim=22, action_dim=2, max_action=np.asarray([180., 6.]))
+policy = TD3(state_dim=22, action_dim=2, max_action=np.asarray([10., 2.]))
 replay_buffer = ReplayBuffer()
 last_reward = 0
 scores = []
 im = CoreImage("./images/MASK1.png")
-
-# textureMask = CoreImage(source="./kivytest/simplemask1.png")
-
+max_velocity = 6.
+min_velocity = 0
+max_angle = +5.
+# min_angle = -5
+max_stuck = 100
+stuck_count = 0
 
 # Initializing the map
 first_update = True
@@ -75,8 +81,8 @@ last_distance = 0
 # Creating the car class
 
 class Car(Widget):
-    angle = NumericProperty(0)
-    rotation = NumericProperty(0)
+    angle = BoundedNumericProperty(0)
+    rotation = BoundedNumericProperty(0)
     velocity_x = NumericProperty(0)
     velocity_y = NumericProperty(0)
     velocity = ReferenceListProperty(velocity_x, velocity_y)
@@ -85,6 +91,10 @@ class Car(Widget):
         self.pos = Vector(*self.velocity) + self.pos
         self.rotation = rotation
         self.angle = self.angle + self.rotation
+        print('rotation: ', rotation)
+        print('car velocity: ', self.velocity)
+        print('car angle: ', self.angle)
+
 
 # Creating the game class
 
@@ -94,7 +104,7 @@ class Game(Widget):
 
     def serve_car(self):
         self.car.center = self.center  # 50, 50???
-        self.car.velocity = Vector(6, 0)
+        self.car.velocity = Vector(2.0, 0)
 
     def evaluate_policy(self, learned_policy, eval_episodes=10):
         avg_reward = 0.
@@ -112,6 +122,8 @@ class Game(Widget):
         return avg_reward
 
     def reset(self, done=False):
+        global goal_x
+        global goal_y
         # returns state/observation variables - snapshot, angle wrt target, distance from target
         if done:
             #   initialize agent with any of the starting points, chosen randomly
@@ -122,63 +134,127 @@ class Game(Widget):
         xx = goal_x - self.car.x
         yy = goal_y - self.car.y
         distance = np.sqrt((self.car.x - goal_x) ** 2 + (self.car.y - goal_y) ** 2)
-        print('car velocity: ', *self.car.velocity, Vector(*self.car.velocity))
-        car_angle = Vector(*self.car.velocity).angle((6.0, 0.0))  # 180 for conversion to radians
-        print('car angle: ', float(car_angle))
+        # car_angle = Vector(*self.car.velocity).angle((6.0, 0.0))  # 180 for conversion to radians
         orientation = Vector(*self.car.velocity).angle((xx, yy)) / 180.
+
+        contour = PILImage.open("./images/MASK1.png").convert("RGB")
+        # rotate arrow head with car angle
+        # car_arrow = car_arrow.resize((20, 10)).rotate(self.car.angle)
+        # contour.paste(car_arrow, (int(self.car.x), largeur - int(self.car.y)))
+        # contour = np.asarray(contour) / 255
+
+        # colorTable = [255] * 256
+        # colorTable[0] = 255  # anything black (0) will be made transparent
+        #
+        # mask = car_arrow.point(colorTable, '1')  # make the transparency mask
+        #
+        # # paste the overlay into the base image in the boundingBox using mask as a filter
+        # contour.paste(car_arrow, (int(self.car.x), largeur - int(self.car.y)), car_arrow)
+        # contour = np.asarray(contour) / 255
+
+        draw = ImageDraw.Draw(contour)
+        degree_to_radian = np.pi / 180.
+
+        draw.polygon([(self.car.x + 20. * np.cos(degree_to_radian * self.car.angle),
+                       largeur - (self.car.y + 20. * np.sin(degree_to_radian * self.car.angle))),
+                      (self.car.x - 5. * np.sin(degree_to_radian * self.car.angle),
+                       largeur - (self.car.y + 5. * np.cos(degree_to_radian * self.car.angle))),
+                      (self.car.x + 5. * np.sin(degree_to_radian * self.car.angle),
+                       largeur - (self.car.y - 5. * np.cos(degree_to_radian * self.car.angle)))], fill=(255, 0, 0))
+
+        width = 100
+        contour = np.asarray(contour)
+        # snapshot = contour[(largeur - car_y) - width:(largeur - car_y) + width, car_x - width: car_x + width]
+        # snapshot = snapshot[::2, ::2]
+        # plt.imshow(snapshot)
+        # plt.show()
+        # snapshot = PILImage.fromarray(np.uint8(cm.gist_earth(snapshot)*255))
+
+        # ROTATION IMAGE BY CAR ANGLE AND CROPPING THE CAR POSITION OUT OF IT
+        # contour = PILImage.open("./images/MASK1.png").convert('L')
+        # contour = np.asarray(contour) / 255
+        # print('car position: ', self.car.pos)
+        shape = (contour.shape[1], contour.shape[0])  # cv2.warpAffine expects shape in (length, height)
+        matrix = cv2.getRotationMatrix2D(center=(self.car.x, self.car.y), angle=-self.car.angle, scale=1)
+        image = cv2.warpAffine(src=contour, M=matrix, dsize=shape)
         car_x = int(self.car.x)
         car_y = int(self.car.y)
 
-        contour = PILImage.open("./images/MASK1.png").convert("RGBA")
-        car_arrow = PILImage.open("./images/car-arrow.jpg").convert("RGBA")
-        # rotate arrow head with car angle
-        car_arrow = car_arrow.resize((20, 10)).rotate(car_angle)
-        contour.paste(car_arrow, (int(self.car.x), largeur - int(self.car.y)), mask=car_arrow)
-        contour = np.asarray(contour) / 255
-        width = 100
-        snapshot = contour[(largeur - car_y) - width:(largeur - car_y) + width, car_x - width: car_x + width]
-        snapshot = PILImage.fromarray(np.uint8(cm.gist_earth(snapshot)*255))
+        # x = int(center[0] - width / 2)
+        # y = int(center[1] - height / 2)
+        #
+        # image = image[y:y + height, x:x + width]
+        # width = 100
+        snapshot = image[(largeur - car_y) - width:(largeur - car_y) + width, car_x - width: car_x + width]
+        # snapshot[50, 50] = (0, 0, 0)
+        # plt.imshow(snapshot)
+        # plt.show()
 
         return snapshot, orientation, distance
 
     def select_random_action(self):
         action = np.random.rand(1, 2)
-        action = np.multiply(action, np.asarray([360., 6.]))
+        action = np.multiply(action, np.asarray([2*max_angle, max_velocity]))
         action.resize(2)
-        action[0] -= 180.
+
+        action[0] -= max_angle
+        # action[1] -= max_velocity
         return action
 
     def step(self, action):
         global last_distance
+        global stuck_count
+        print('stuck count: ', stuck_count)
+        # action - angle, velocity
+        # observation - image, orientation wrt target, distance from target
         self.car.move(action[0])
-        self.car.velocity = Vector(action[1], 0).rotate(self.car.angle)
+        self.car.velocity = Vector(float(action[1]), 0).rotate(self.car.angle)
+
         reward = 0
         new_obs = self.reset()
         done = False
         distance = new_obs[2]
         if distance < 25:
+            print('reached target!!!')
             reward += 5
             done = True
         elif distance < last_distance:
+            print('closer to target')
             reward += 0.1
         else:
+            print('away from target')
             reward += -0.2
 
-        if self.car.x < 5:
-            self.car.x = 5
+        if stuck_count > max_stuck:
+            print('stuck in the boundary for too long!')
+            reward += -2
+            done = True
+
+        if self.car.x < 10:
+            self.car.x = 10
+            stuck_count += 1
             reward += -1
-        if self.car.x > self.width - 5:
-            self.car.x = self.width - 5
+        elif self.car.x > self.width - 10:
+            self.car.x = self.width - 10
+            stuck_count += 1
             reward += -1
-        if self.car.y < 5:
-            self.car.y = 5
+        elif self.car.y < 10:
+            self.car.y = 10
+            stuck_count += 1
             reward += -1
-        if self.car.y > self.height - 5:
-            self.car.y = self.height - 5
+        elif self.car.y > self.height - 10:
+            self.car.y = self.height - 10
+            stuck_count += 1
             reward += -1
+        else:
+            stuck_count = 0
 
         if sand[int(self.car.x), int(self.car.y)] > 0:
             reward += -1
+        else:  # negative reward for spending more time reaching the goal
+            reward += -0.2
+
+        print('car position: ', self.car.pos)
 
         print(goal_x, goal_y, distance, int(self.car.x), int(self.car.y),
               im.read_pixel(int(self.car.x), int(self.car.y)))
@@ -201,11 +277,32 @@ class Game(Widget):
 
         longueur = self.width
         largeur = self.height
+        global obs
+        global done
+        global total_timesteps
+        global start_timesteps
+        global batch_size
+        global episode_num
+        global episode_reward
+        global episode_timesteps
+        global discount
+        global tau
+        global policy_noise
+        global noise_clip
+        global policy_freq
+        global timesteps_since_eval
+        global eval_freq
+        global evaluations
+        global file_name
+        global expl_noise
+        global max_episode_steps
+
         if first_update:
-            global obs
+            init()
             self.car.center = (708, 226)
             seed = 0  # Random seed number
-            start_timesteps = 1e4  # Number of iterations/timesteps before which the model randomly chooses an action, and after which it starts to use the policy network
+            start_timesteps = 1e3  # Number of iterations/timesteps before which the model randomly chooses an action,
+            # and after which it starts to use the policy network
             eval_freq = 5e3  # How often the evaluation step is performed (after how many timesteps)
             # max_timesteps = 5e5  # Total number of iterations/timesteps
             save_models = True  # Boolean checker whether or not to save the pre-trained model
@@ -226,7 +323,6 @@ class Game(Widget):
             file_name = 'TD3'
             max_episode_steps = 1e4
             obs = self.reset()
-            init()
 
         if done:
             # If we are not at the very beginning, we start the training process of the model
@@ -263,8 +359,8 @@ class Game(Widget):
             action = policy.select_action(np.array(obs))
             # If the explore_noise parameter is not 0, we add noise to the action and we clip it
             if expl_noise != 0:
-                action = (action + np.random.normal(0, expl_noise, size=2)).clip(np.asarray([-180., 0.]),
-                                                                                 np.asarray([180., 6.]))
+                action = (action + np.random.normal(0, expl_noise, size=2)).clip(np.asarray([-max_angle, min_velocity]),
+                                                                                 np.asarray([max_angle, max_velocity]))
 
             # The agent performs the action in the environment, then reaches the next state and receives the reward
         new_obs, reward, done, _ = self.step(action)
@@ -278,7 +374,8 @@ class Game(Widget):
         # We store the new transition into the Experience Replay memory (ReplayBuffer)
         replay_buffer.add((obs, new_obs, action, reward, done_bool))
 
-        # We update the state, the episode timestep, the total timesteps, and the timesteps since the evaluation of the policy
+        # We update the state, the episode timestep, the total timesteps, and the timesteps since the evaluation of
+        # the policy
         obs = new_obs
         episode_timesteps += 1
         total_timesteps += 1
@@ -288,7 +385,6 @@ class Game(Widget):
         # evaluations.append(evaluate_policy(policy))
         # if save_models: policy.save("%s" % (file_name), directory="./pytorch_models")
         # np.save("./results/%s" % (file_name), evaluations)
-
 
 
 # Adding the painting tools

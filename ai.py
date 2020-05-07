@@ -7,16 +7,53 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import transforms
+from PIL import Image
+import matplotlib.pyplot as plt
 
 
 # Creating the architecture of the Neural Network
+
+def decompress_state(state):
+    state_arrays = list()
+    images = list()
+    print('state shape: ', state.shape)
+    state = state[0]
+    print('state values: ', state)
+    print('state size: ', state.size)
+
+    # for state in states:
+    image, orientation, distance = state
+    print('image size: ', image.shape)
+    # image = image.resize(1, image)
+    # image_pil = 0
+    try:
+        image_pil = Image.fromarray(image)
+        image_pil = image_pil.resize((1, image.shape[0], image.shape[1], image.shape[2]))
+    except:
+        print('image tile: ', image.tile)
+        plt.imshow(image)
+        plt.show()
+    state_array = np.asarray([orientation, distance])
+    print(type(image_pil))
+    print(type(orientation))
+    print(type(distance))
+    # orientation = torch.Tensor(orientation).float().unsqueeze(0)
+    # distance = torch.Tensor(distance).float().unsqueeze(0)
+    # orientation = torch.Tensor(orientation.reshape(1, -1)).to(device)
+    state_array = torch.Tensor(state_array.reshape(1, -1)).to(device)
+
+    # state_arrays.append(state_array)
+    # images.append(image_pil)
+
+    return image_pil, state_array
 
 
 class ImageEncoder(nn.Module):
 
     def __init__(self):
+        super(ImageEncoder, self).__init__()
         self.img_transforms = transforms.Compose([transforms.Resize((28, 28)),
-                                                  #  transforms.ToPILImage(),
+                                                  # transforms.ToPILImage(),
                                                   transforms.ToTensor()])
 
         self.convblock1 = nn.Sequential(
@@ -85,7 +122,8 @@ class Actor(nn.Module):
         self.layer_3 = nn.Linear(300, action_dim)
         self.max_action = max_action
 
-    def forward(self, image, orientation, distance):
+    def forward(self, state):
+        image, state_array = decompress_state(state)
         image = self.img_encoder.image_transform(image)
         image = self.transforms(image)
         image = self.convblock1(image)
@@ -97,10 +135,10 @@ class Actor(nn.Module):
         image = self.convblock6(image)
         image = self.pool2(image)
 
-        state = torch.cat([image, orientation, distance])
+        state = torch.cat([image, state_array])
         state = F.relu(self.layer_1(state))
         state = F.relu(self.layer_2(state))
-        state = self.max_action * torch.tanh(self.layer_3(state))
+        state = self.max_action * torch.tanh(10 * self.layer_3(state))  # 10 is the Temperature?
         return state
 
 
@@ -123,6 +161,7 @@ class Critic(nn.Module):
         self.layer_6 = nn.Linear(300, 1)
 
     def forward(self, x, u):
+        x = decompress_state(x)
         image1 = self.img_encoder1.image_transform(x[0])
         xu = torch.cat([image1, x[1], x[2], u[0], u[1]], 1)
         # Forward-Propagation on the first Critic Neural Network
@@ -138,6 +177,7 @@ class Critic(nn.Module):
         return x1, x2
 
     def Q1(self, x, u):
+        x = decompress_state(x)
         image = self.img_encoder1.image_transform(x[0])
         xu = torch.cat([image, x[1], x[2], u[0], u[1]], 1)
         x1 = F.relu(self.layer_1(xu))
@@ -163,9 +203,9 @@ class ReplayBuffer(object):
             self.storage.append(transition)
 
     def sample(self, batch_size):
-        ind = np.random.randint(0, len(self.storage), size=batch_size)
+        indices = np.random.randint(0, len(self.storage), size=batch_size)
         batch_states, batch_next_states, batch_actions, batch_rewards, batch_dones = [], [], [], [], []
-        for i in ind:
+        for i in indices:
             state, next_state, action, reward, done = self.storage[i]
             batch_states.append(np.array(state, copy=False))
             batch_next_states.append(np.array(next_state, copy=False))
@@ -198,8 +238,11 @@ class TD3(object):
         self.max_action = max_action
 
     def select_action(self, state):
-        state = torch.Tensor(state.reshape(1, -1)).to(device)
-        return self.actor(state).cpu().data.numpy().flatten()
+        # probs = F.softmax(self.model(Variable(state, volatile=True)) * 100)  # T=100
+        # action = probs.multinomial(num_samples=1)
+        # return action.data[0, 0]
+        image_pil, state_array = decompress_state(state)
+        return self.actor(image_pil, state_array).cpu().data.numpy().flatten()
 
     def train(self, replay_buffer, iterations, batch_size=100, discount=0.99, tau=0.005, policy_noise=0.2,
               noise_clip=0.5, policy_freq=2):
@@ -209,43 +252,52 @@ class TD3(object):
             # Step 4: We sample a batch of transitions (s, s’, a, r) from the memory
             batch_states, batch_next_states, batch_actions, batch_rewards, batch_dones = replay_buffer.sample(
                 batch_size)
-            state = torch.Tensor(batch_states).to(device)
-            next_state = torch.Tensor(batch_next_states).to(device)
+            # state now has image, orientation wrt target, distance wrt target
+
+            # state = torch.Tensor(batch_states).to(device)
+            # next_state = torch.Tensor(batch_next_states).to(device)
             action = torch.Tensor(batch_actions).to(device)
             reward = torch.Tensor(batch_rewards).to(device)
             done = torch.Tensor(batch_dones).to(device)
 
             # Step 5: From the next state s’, the Actor target plays the next action a’
-            next_action = self.actor_target(next_state)
+            next_action = self.actor_target(batch_next_states)
 
-            # Step 6: We add Gaussian noise to this next action a’ and we clamp it in a range of values supported by the environment
+            # Step 6: We add Gaussian noise to this next action a’ and we clamp it in a range of values supported by
+            # the environment
             noise = torch.Tensor(batch_actions).data.normal_(0, policy_noise).to(device)
             noise = noise.clamp(-noise_clip, noise_clip)
             next_action = (next_action + noise).clamp(-self.max_action, self.max_action)
 
-            # Step 7: The two Critic targets take each the couple (s’, a’) as input and return two Q-values Qt1(s’,a’) and Qt2(s’,a’) as outputs
-            target_Q1, target_Q2 = self.critic_target(next_state, next_action)
+            # Step 7: The two Critic targets take each the couple (s’, a’) as input and return two Q-values Qt1(s’,a’)
+            # and Qt2(s’,a’) as outputs
+            target_Q1, target_Q2 = self.critic_target(batch_next_states, next_action)
 
             # Step 8: We keep the minimum of these two Q-values: min(Qt1, Qt2)
             target_Q = torch.min(target_Q1, target_Q2)
 
-            # Step 9: We get the final target of the two Critic models, which is: Qt = r + γ * min(Qt1, Qt2), where γ is the discount factor
+            # Step 9: We get the final target of the two Critic models, which is: Qt = r + γ * min(Qt1, Qt2), where γ is
+            #  the discount factor
             target_Q = reward + ((1 - done) * discount * target_Q).detach()
 
-            # Step 10: The two Critic models take each the couple (s, a) as input and return two Q-values Q1(s,a) and Q2(s,a) as outputs
-            current_Q1, current_Q2 = self.critic(state, action)
+            # Step 10: The two Critic models take each the couple (s, a) as input and return two Q-values Q1(s,a) and
+            # Q2(s,a) as outputs
+            current_Q1, current_Q2 = self.critic(batch_states, action)
 
-            # Step 11: We compute the loss coming from the two Critic models: Critic Loss = MSE_Loss(Q1(s,a), Qt) + MSE_Loss(Q2(s,a), Qt)
+            # Step 11: We compute the loss coming from the two Critic models: Critic Loss = MSE_Loss(Q1(s,a), Qt) +
+            # MSE_Loss(Q2(s,a), Qt)
             critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q)
 
-            # Step 12: We backpropagate this Critic loss and update the parameters of the two Critic models with a SGD optimizer
+            # Step 12: We backpropagate this Critic loss and update the parameters of the two Critic models with a SGD
+            # optimizer
             self.critic_optimizer.zero_grad()
             critic_loss.backward()
             self.critic_optimizer.step()
 
-            # Step 13: Once every two iterations, we update our Actor model by performing gradient ascent on the output of the first Critic model
+            # Step 13: Once every two iterations, we update our Actor model by performing gradient ascent on the output
+            # of the first Critic model
             if it % policy_freq == 0:
-                actor_loss = -self.critic.Q1(state, self.actor(state)).mean()
+                actor_loss = -self.critic.Q1(batch_states, self.actor(batch_states)).mean()
                 self.actor_optimizer.zero_grad()
                 actor_loss.backward()
                 self.actor_optimizer.step()
